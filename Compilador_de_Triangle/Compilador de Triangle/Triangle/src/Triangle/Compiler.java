@@ -19,11 +19,17 @@ package Triangle;
 
 import Triangle.AbstractSyntaxTrees.Program;
 import Triangle.CodeGenerator.Encoder;
+import Triangle.CodeGenerator.LLVM.LLVMGenerator;
 import Triangle.ContextualAnalyzer.Checker;
 import Triangle.SyntacticAnalyzer.Parser;
 import Triangle.SyntacticAnalyzer.Scanner;
 import Triangle.SyntacticAnalyzer.SourceFile;
 import Triangle.TreeDrawer.Drawer;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 
 /**
  * The main driver class for the Triangle compiler.
@@ -97,7 +103,8 @@ public class Compiler {
             }
             if (reporter.numErrors == 0) {
                 System.out.println("Code Generation ...");
-                encoder.encodeRun(theAST, showingTable);	// 3rd pass
+                encoder.encodeRun(theAST, showingTable);    // 3rd pass
+                emitLlvmModuleIfRequested(theAST, objectName);
             }
         }
 
@@ -118,14 +125,63 @@ public class Compiler {
      *                  the source filename.
      */
     public static void main(String[] args) {
-        boolean compiledOK;
-
         if (args.length != 1) {
             System.out.println("Usage: tc filename");
             System.exit(1);
         }
 
         String sourceName = args[0];
-        compiledOK = compileProgram(sourceName, objectName, false, false);
+        compileProgram(sourceName, objectName, false, false);
+    }
+
+    private static void emitLlvmModuleIfRequested(Program program, String tamObjectName) {
+        if (!shouldEmitLlvmArtifacts()) {
+            return;
+        }
+
+        LLVMGenerator generator = new LLVMGenerator();
+        LLVMGenerator.Request request = LLVMGenerator.Request.defaults();
+        LLVMGenerator.Result result = generator.generate(program, request);
+
+        Path irPath = determineLlvmOutputPath(tamObjectName);
+        try {
+            Path parent = irPath.toAbsolutePath().getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            Files.write(irPath, result.irModule().getBytes(StandardCharsets.UTF_8));
+            System.out.println("LLVM IR written to " + irPath.toAbsolutePath());
+        } catch (IOException ex) {
+            System.out.println("Failed to write LLVM IR: " + ex.getMessage());
+        }
+    }
+
+    private static boolean shouldEmitLlvmArtifacts() {
+        String backendProperty = System.getProperty("triangle.backend", "");
+        if ("llvm".equalsIgnoreCase(backendProperty)) {
+            return true;
+        }
+
+        String emitFlag = System.getProperty("triangle.emitLLVM", "");
+        if (Boolean.parseBoolean(emitFlag)) {
+            return true;
+        }
+
+        String envFlag = System.getenv("TRIANGLE_LLVM");
+        return envFlag != null && !envFlag.equals("0");
+    }
+
+    private static Path determineLlvmOutputPath(String tamObjectName) {
+        String override = System.getProperty("triangle.llvm.output");
+        if (override != null && !override.trim().isEmpty()) {
+            return Paths.get(override);
+        }
+
+        String baseName = tamObjectName;
+        int dot = baseName.lastIndexOf('.');
+        if (dot > 0) {
+            baseName = baseName.substring(0, dot);
+        }
+        return Paths.get(baseName + ".ll");
     }
 }

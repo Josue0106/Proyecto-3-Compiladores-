@@ -1,0 +1,10 @@
+let
+  var suma: Integer;
+  var i: Integer
+in
+  begin
+    suma := 0;
+    for i := 1 to 100 do
+      suma := suma + i;
+    putint(suma)
+  end

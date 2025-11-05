@@ -28,6 +28,7 @@ import java.io.BufferedReader;
 import java.io.FileWriter;
 import javax.swing.ImageIcon;
 import java.awt.Image;
+import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JFileChooser;
 import javax.swing.JOptionPane;
 import javax.swing.LookAndFeel;
@@ -60,6 +61,8 @@ public class Main extends javax.swing.JFrame {
         setSize(640, 480);
         setVisible(true);
         directory = new File(".");
+        compiler.setEmitLlvm(false);
+        llvmMenuItem.setSelected(false);
     }
     
     /**
@@ -148,6 +151,17 @@ public class Main extends javax.swing.JFrame {
         return(chooser);
     }
 
+    private String replaceExtension(String fileName, String newExtension) {
+        if (fileName == null) {
+            return newExtension;
+        }
+        int dot = fileName.lastIndexOf('.');
+        if (dot >= 0) {
+            return fileName.substring(0, dot) + newExtension;
+        }
+        return fileName + newExtension;
+    }
+
     /**
      * Main method, instantiates the Main class.
      */
@@ -188,6 +202,7 @@ public class Main extends javax.swing.JFrame {
         copyMenuItem = new javax.swing.JMenuItem();
         pasteMenuItem = new javax.swing.JMenuItem();
         triangleMenu = new javax.swing.JMenu();
+    llvmMenuItem = new JCheckBoxMenuItem();
         compileMenuItem = new javax.swing.JMenuItem();
         runMenuItem = new javax.swing.JMenuItem();
         helpMenu = new javax.swing.JMenu();
@@ -462,6 +477,16 @@ public class Main extends javax.swing.JFrame {
         triangleMenu.setMnemonic('T');
         triangleMenu.setText("Triangle");
         triangleMenu.setBorderPainted(true);
+        llvmMenuItem.setMnemonic('L');
+        llvmMenuItem.setText("Emit LLVM IR");
+        llvmMenuItem.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                llvmMenuItemActionPerformed(evt);
+            }
+        });
+
+        triangleMenu.add(llvmMenuItem);
+
         compileMenuItem.setAccelerator(javax.swing.KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_F5, 0));
         compileMenuItem.setIcon(new javax.swing.ImageIcon(getClass().getResource("/GUI/Icons/iconTriangleCompile.gif")));
         compileMenuItem.setMnemonic('C');
@@ -601,34 +626,50 @@ public class Main extends javax.swing.JFrame {
      * Handles the "Compile" button and menu option.
      */
     private void compileMenuItemActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_compileMenuItemActionPerformed
-        if ((!((FileFrame)desktopPane.getSelectedFrame()).getPreviouslySaved()) || ((FileFrame)desktopPane.getSelectedFrame()).hasChanged()) {
+        FileFrame currentFrame = (FileFrame)desktopPane.getSelectedFrame();
+        if (currentFrame == null) {
+            return;
+        }
+        if ((!currentFrame.getPreviouslySaved()) || currentFrame.hasChanged()) {
             saveMenuItemActionPerformed(null);
         }
-        
-        if (((FileFrame)desktopPane.getSelectedFrame()).getPreviouslySaved()) {
-            ((FileFrame)desktopPane.getSelectedFrame()).selectConsole();
-            ((FileFrame)desktopPane.getSelectedFrame()).clearConsole();
-            ((FileFrame)desktopPane.getSelectedFrame()).clearTAMCode();
-            ((FileFrame)desktopPane.getSelectedFrame()).clearTree();
-            ((FileFrame)desktopPane.getSelectedFrame()).clearTable();
-            new File(desktopPane.getSelectedFrame().getTitle().replace(".tri", ".tam")).delete();
-            
-            output.setDelegate(delegateConsole);            
-            if (compiler.compileProgram(desktopPane.getSelectedFrame().getTitle())) {           
+
+        if (currentFrame.getPreviouslySaved()) {
+            currentFrame.selectConsole();
+            currentFrame.clearConsole();
+            currentFrame.clearTAMCode();
+            currentFrame.clearLlvmModule();
+            currentFrame.clearTree();
+            currentFrame.clearTable();
+            String sourceName = currentFrame.getTitle();
+            String tamPath = replaceExtension(sourceName, ".tam");
+            String llvmPath = replaceExtension(sourceName, ".ll");
+            new File(tamPath).delete();
+            new File(llvmPath).delete();
+
+            output.setDelegate(delegateConsole);
+            if (compiler.compileProgram(sourceName)) {
                 output.setDelegate(delegateTAMCode);
-                disassembler.Disassemble(desktopPane.getSelectedFrame().getTitle().replace(".tri", ".tam"));
-                ((FileFrame)desktopPane.getSelectedFrame()).setTree((DefaultMutableTreeNode)treeVisitor.visitProgram(compiler.getAST(), null));
-                ((FileFrame)desktopPane.getSelectedFrame()).setTable(tableVisitor.getTable(compiler.getAST()));
-                
+                disassembler.Disassemble(tamPath);
+                currentFrame.setTree((DefaultMutableTreeNode)treeVisitor.visitProgram(compiler.getAST(), null));
+                currentFrame.setTable(tableVisitor.getTable(compiler.getAST()));
+                if (compiler.isEmitLlvm() && compiler.getLlvmModule() != null) {
+                    currentFrame.writeToLlvmModule(compiler.getLlvmModule());
+                }
+
                 runMenuItem.setEnabled(true);
                 buttonRun.setEnabled(true);
             } else {
-                ((FileFrame)desktopPane.getSelectedFrame()).highlightError(compiler.getErrorPosition());
+                currentFrame.highlightError(compiler.getErrorPosition());
                 runMenuItem.setEnabled(false);
                 buttonRun.setEnabled(false);
             }
         }
     }//GEN-LAST:event_compileMenuItemActionPerformed
+
+    private void llvmMenuItemActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_llvmMenuItemActionPerformed
+        compiler.setEmitLlvm(llvmMenuItem.isSelected());
+    }//GEN-LAST:event_llvmMenuItemActionPerformed
 
     /**
      * Handles the "Save" button and menu option.
@@ -850,6 +891,7 @@ public class Main extends javax.swing.JFrame {
     javax.swing.JMenu triangleMenu;
     javax.swing.JToolBar triangleToolBar;
     // End of variables declaration//GEN-END:variables
+    private JCheckBoxMenuItem llvmMenuItem;
     // </editor-fold>
     
     // <editor-fold defaultstate="collapsed" desc=" Non-GUI Variables ">

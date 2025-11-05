@@ -15,6 +15,10 @@ import Triangle.AbstractSyntaxTrees.Program;
 import Triangle.SyntacticAnalyzer.Parser;
 import Triangle.ContextualAnalyzer.Checker;
 import Triangle.CodeGenerator.Encoder;
+import Triangle.CodeGenerator.LLVM.LLVMGenerator;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
 
 
 
@@ -52,6 +56,8 @@ public class IDECompiler {
         report = new IDEReporter();
         Parser parser = new Parser(scanner, report);
         boolean success = false;
+        lastLlvmModule = null;
+        lastLlvmOutputPath = null;
         
         rootAST = parser.parseProgram();
         if (report.numErrors == 0) {
@@ -64,7 +70,10 @@ public class IDECompiler {
                 encoder.encodeRun(rootAST, false);
                 
                 if (report.numErrors == 0) {
-                    encoder.saveObjectProgram(sourceName.replace(".tri", ".tam"));
+                    encoder.saveObjectProgram(replaceExtension(sourceName, ".tam"));
+                    if (emitLlvm) {
+                        generateLlvmModule(sourceName, rootAST);
+                    }
                     success = true;
                 }
             }
@@ -93,10 +102,70 @@ public class IDECompiler {
     public Program getAST() {
         return(rootAST);
     }
+
+    public void setEmitLlvm(boolean emit) {
+        this.emitLlvm = emit;
+    }
+
+    public boolean isEmitLlvm() {
+        return emitLlvm;
+    }
+
+    public String getLlvmModule() {
+        return lastLlvmModule;
+    }
+
+    public String getLlvmOutputPath() {
+        return lastLlvmOutputPath;
+    }
     // </editor-fold>
     
     // <editor-fold defaultstate="collapsed" desc=" Attributes ">
     private Program rootAST;        // The Root Abstract Syntax Tree.    
     private IDEReporter report;     // Our ErrorReporter class.
+    private boolean emitLlvm;
+    private LLVMGenerator.Request llvmRequest = LLVMGenerator.Request.defaults();
+    private String lastLlvmModule;
+    private String lastLlvmOutputPath;
     // </editor-fold>
+
+    private void generateLlvmModule(String sourceName, Program program) {
+        try {
+            LLVMGenerator generator = new LLVMGenerator();
+            LLVMGenerator.Result result = generator.generate(program, llvmRequest);
+            lastLlvmModule = result.irModule();
+            if (lastLlvmModule == null) {
+                lastLlvmModule = "";
+            }
+            String outputPath = replaceExtension(sourceName, ".ll");
+            File outputFile = new File(outputPath);
+            FileWriter writer = new FileWriter(outputFile);
+            try {
+                writer.write(lastLlvmModule);
+            } finally {
+                writer.close();
+            }
+            lastLlvmOutputPath = outputFile.getAbsolutePath();
+            System.out.println("LLVM IR written to " + lastLlvmOutputPath);
+        } catch (IOException ex) {
+            System.out.println("Failed to write LLVM IR: " + ex.getMessage());
+            lastLlvmModule = null;
+            lastLlvmOutputPath = null;
+        } catch (RuntimeException ex) {
+            System.out.println("Failed to generate LLVM IR: " + ex.getMessage());
+            lastLlvmModule = null;
+            lastLlvmOutputPath = null;
+        }
+    }
+
+    private String replaceExtension(String sourceName, String newExtension) {
+        if (sourceName == null) {
+            return newExtension;
+        }
+        int dot = sourceName.lastIndexOf('.');
+        if (dot >= 0) {
+            return sourceName.substring(0, dot) + newExtension;
+        }
+        return sourceName + newExtension;
+    }
 }

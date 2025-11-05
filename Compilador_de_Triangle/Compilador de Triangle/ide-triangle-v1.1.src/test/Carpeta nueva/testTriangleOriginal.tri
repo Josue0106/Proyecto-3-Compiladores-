@@ -1,0 +1,15 @@
+let
+  func aplicar (func f (x: Integer) : Integer, x: Integer): Integer ~
+    f(x);
+  func doble (x: Integer): Integer ~
+    x * 2;
+  func cuadrado (x: Integer): Integer ~
+    x * x;
+
+  const resultado1 ~ aplicar(func doble, 5);
+  const resultado2 ~ aplicar(func cuadrado, 5)
+in
+  begin
+    putint(resultado1);
+    putint(resultado2);
+  end

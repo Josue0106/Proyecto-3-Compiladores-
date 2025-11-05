@@ -4,16 +4,12 @@
  */
 
 package GUI;
-import java.awt.Color;
 import java.awt.event.ActionListener;
 import java.awt.event.KeyAdapter;
 import java.awt.event.MouseListener;
-import javax.swing.JOptionPane;
-import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.JTree;
 import javax.swing.event.InternalFrameListener;
-import javax.swing.plaf.basic.BasicInternalFrameUI;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.text.Element;
 import javax.swing.tree.DefaultMutableTreeNode;
@@ -127,6 +123,9 @@ public class FileFrame extends javax.swing.JInternalFrame {
         
         if (className.compareTo("tamScroll") == 0)
             ret = tamPane.getSelectedText();
+
+        if (className.compareTo("llvmScroll") == 0)
+            ret = llvmPane.getSelectedText();
         
         return(ret);
     }
@@ -191,6 +190,25 @@ public class FileFrame extends javax.swing.JInternalFrame {
      */
     public void writeToTAMCode(String text) {
         tamPane.setText(tamPane.getText() + text);
+    }
+
+    /**
+     * Clears the LLVM IR pane.
+     */
+    public void clearLlvmModule() {
+        if (llvmPane != null) {
+            llvmPane.setText("");
+        }
+    }
+
+    /**
+     * Writes the LLVM IR contents.
+     * @param text Text to display in the LLVM tab.
+     */
+    public void writeToLlvmModule(String text) {
+        if (llvmPane != null) {
+            llvmPane.setText(text);
+        }
     }
       
     /**
@@ -302,6 +320,8 @@ public class FileFrame extends javax.swing.JInternalFrame {
         astScroll = new javax.swing.JScrollPane();
         tamScroll = new javax.swing.JScrollPane();
         tamPane = new javax.swing.JEditorPane();
+    llvmScroll = new javax.swing.JScrollPane();
+    llvmPane = new javax.swing.JEditorPane();
         tableScroll = new javax.swing.JScrollPane();
 
         setClosable(true);
@@ -369,6 +389,15 @@ public class FileFrame extends javax.swing.JInternalFrame {
 
         tabbedPane.addTab("TAM Code", tamScroll);
 
+    llvmScroll.setBorder(null);
+    llvmScroll.setHorizontalScrollBarPolicy(javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+    llvmScroll.setName("llvmScroll");
+    llvmPane.setEditable(false);
+    llvmPane.setFont(new java.awt.Font("Courier New", 0, 12));
+    llvmScroll.setViewportView(llvmPane);
+
+    tabbedPane.addTab("LLVM IR", llvmScroll);
+
         tableScroll.setBorder(null);
         tabbedPane.addTab("Table Details", tableScroll);
 
@@ -391,6 +420,8 @@ public class FileFrame extends javax.swing.JInternalFrame {
     private javax.swing.JPanel sourcePanel;
     private javax.swing.JScrollPane sourceScroll;
     private javax.swing.JTabbedPane tabbedPane;
+    private javax.swing.JEditorPane llvmPane;
+    private javax.swing.JScrollPane llvmScroll;
     private javax.swing.JScrollPane tableScroll;
     private javax.swing.JEditorPane tamPane;
     private javax.swing.JScrollPane tamScroll;
