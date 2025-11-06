@@ -26,6 +26,7 @@ import java.io.FileFilter;
 import java.io.FileReader;
 import java.io.BufferedReader;
 import java.io.FileWriter;
+import java.io.IOException;
 import javax.swing.ImageIcon;
 import java.awt.Image;
 import javax.swing.JCheckBoxMenuItem;
@@ -33,12 +34,15 @@ import javax.swing.JFileChooser;
 import javax.swing.JOptionPane;
 import javax.swing.LookAndFeel;
 import javax.swing.UIManager;
+import Triangle.CodeGenerator.LLVM.NativeToolchain;
 import Triangle.IDECompiler;
 import Core.ExampleFileFilter;
 import javax.swing.event.InternalFrameEvent;
 import javax.swing.event.InternalFrameListener;
 import Core.Visitors.TreeVisitor;
 import javax.swing.tree.DefaultMutableTreeNode;
+import javax.swing.SwingUtilities;
+import java.io.InputStreamReader;
 
 /**
  * The Main class. Contains the main form.
@@ -63,6 +67,7 @@ public class Main extends javax.swing.JFrame {
         directory = new File(".");
         compiler.setEmitLlvm(false);
         llvmMenuItem.setSelected(false);
+        updateLlvmUiState();
     }
     
     /**
@@ -101,6 +106,67 @@ public class Main extends javax.swing.JFrame {
             runMenuItem.setEnabled(false);           
         } else
             checkSaveChanges();
+
+        updateLlvmUiState();
+    }
+
+    private void updateLlvmUiState() {
+        if (saveLlvmMenuItem == null) {
+            return;
+        }
+        boolean emitLlvm = compiler.isEmitLlvm();
+        boolean hasModule = emitLlvm && compiler.hasLlvmModule();
+        boolean hasNative = compiler.hasNativeExecutable();
+        saveLlvmMenuItem.setEnabled(hasModule);
+        if (saveAsmMenuItem != null) {
+            saveAsmMenuItem.setEnabled(hasModule);
+        }
+        if (saveObjMenuItem != null) {
+            saveObjMenuItem.setEnabled(hasModule);
+        }
+        if (viewLlvmMenuItem != null) {
+            viewLlvmMenuItem.setEnabled(hasModule);
+        }
+        if (compileNativeMenuItem != null) {
+            compileNativeMenuItem.setEnabled(hasModule);
+        }
+        if (runNativeMenuItem != null) {
+            runNativeMenuItem.setEnabled(hasNative);
+        }
+        if (runNativeShellMenuItem != null) {
+            runNativeShellMenuItem.setEnabled(hasNative);
+        }
+    }
+
+    private void setNativeActionsBusy(boolean busy) {
+        if (busy) {
+            if (compileNativeMenuItem != null) {
+                compileNativeMenuItem.setEnabled(false);
+            }
+            if (runNativeMenuItem != null) {
+                runNativeMenuItem.setEnabled(false);
+            }
+        } else {
+            updateLlvmUiState();
+        }
+    }
+
+    private void setNativeExecutionRunning(boolean running) {
+        if (running) {
+            compileMenuItem.setEnabled(false);
+            buttonCompile.setEnabled(false);
+            runMenuItem.setEnabled(false);
+            buttonRun.setEnabled(false);
+            if (compileNativeMenuItem != null) {
+                compileNativeMenuItem.setEnabled(false);
+            }
+            if (runNativeMenuItem != null) {
+                runNativeMenuItem.setEnabled(false);
+            }
+        } else {
+            delegateRun.actionPerformed(null);
+            updateLlvmUiState();
+        }
     }
     
     /**
@@ -203,6 +269,10 @@ public class Main extends javax.swing.JFrame {
         pasteMenuItem = new javax.swing.JMenuItem();
         triangleMenu = new javax.swing.JMenu();
     llvmMenuItem = new JCheckBoxMenuItem();
+        saveLlvmMenuItem = new javax.swing.JMenuItem();
+    optimizationMenuItem = new javax.swing.JMenuItem();
+        compileNativeMenuItem = new javax.swing.JMenuItem();
+        runNativeMenuItem = new javax.swing.JMenuItem();
         compileMenuItem = new javax.swing.JMenuItem();
         runMenuItem = new javax.swing.JMenuItem();
         helpMenu = new javax.swing.JMenu();
@@ -487,6 +557,92 @@ public class Main extends javax.swing.JFrame {
 
         triangleMenu.add(llvmMenuItem);
 
+        saveLlvmMenuItem.setMnemonic('V');
+        saveLlvmMenuItem.setText("Save LLVM IR...");
+        saveLlvmMenuItem.setEnabled(false);
+        saveLlvmMenuItem.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                saveLlvmMenuItemActionPerformed(evt);
+            }
+        });
+
+        triangleMenu.add(saveLlvmMenuItem);
+
+        optimizationMenuItem.setMnemonic('Z');
+        optimizationMenuItem.setText("Optimization…");
+        optimizationMenuItem.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                optimizationMenuItemActionPerformed(evt);
+            }
+        });
+        triangleMenu.add(optimizationMenuItem);
+
+        saveAsmMenuItem = new javax.swing.JMenuItem();
+        saveAsmMenuItem.setMnemonic('A');
+        saveAsmMenuItem.setText("Save Native Assembly...");
+        saveAsmMenuItem.setEnabled(false);
+        saveAsmMenuItem.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                saveAsmMenuItemActionPerformed(evt);
+            }
+        });
+        triangleMenu.add(saveAsmMenuItem);
+
+        saveObjMenuItem = new javax.swing.JMenuItem();
+        saveObjMenuItem.setMnemonic('O');
+        saveObjMenuItem.setText("Save Native Object...");
+        saveObjMenuItem.setEnabled(false);
+        saveObjMenuItem.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                saveObjMenuItemActionPerformed(evt);
+            }
+        });
+        triangleMenu.add(saveObjMenuItem);
+
+        viewLlvmMenuItem = new javax.swing.JMenuItem();
+        viewLlvmMenuItem.setMnemonic('I');
+        viewLlvmMenuItem.setText("View LLVM IR");
+        viewLlvmMenuItem.setEnabled(false);
+        viewLlvmMenuItem.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                viewLlvmMenuItemActionPerformed(evt);
+            }
+        });
+        triangleMenu.add(viewLlvmMenuItem);
+
+        compileNativeMenuItem.setMnemonic('N');
+        compileNativeMenuItem.setText("Compile Native");
+        compileNativeMenuItem.setEnabled(false);
+        compileNativeMenuItem.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                compileNativeMenuItemActionPerformed(evt);
+            }
+        });
+
+        triangleMenu.add(compileNativeMenuItem);
+
+        runNativeMenuItem.setMnemonic('E');
+        runNativeMenuItem.setText("Run Native");
+        runNativeMenuItem.setEnabled(false);
+        runNativeMenuItem.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                runNativeMenuItemActionPerformed(evt);
+            }
+        });
+
+        triangleMenu.add(runNativeMenuItem);
+
+        runNativeShellMenuItem = new javax.swing.JMenuItem();
+        runNativeShellMenuItem.setMnemonic('W');
+        runNativeShellMenuItem.setText("Run Native in Shell");
+        runNativeShellMenuItem.setEnabled(false);
+        runNativeShellMenuItem.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent evt) {
+                runNativeShellMenuItemActionPerformed(evt);
+            }
+        });
+        triangleMenu.add(runNativeShellMenuItem);
+
         compileMenuItem.setAccelerator(javax.swing.KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_F5, 0));
         compileMenuItem.setIcon(new javax.swing.ImageIcon(getClass().getResource("/GUI/Icons/iconTriangleCompile.gif")));
         compileMenuItem.setMnemonic('C');
@@ -646,6 +802,8 @@ public class Main extends javax.swing.JFrame {
             String llvmPath = replaceExtension(sourceName, ".ll");
             new File(tamPath).delete();
             new File(llvmPath).delete();
+            compiler.clearNativeArtifacts();
+            updateLlvmUiState();
 
             output.setDelegate(delegateConsole);
             if (compiler.compileProgram(sourceName)) {
@@ -659,17 +817,541 @@ public class Main extends javax.swing.JFrame {
 
                 runMenuItem.setEnabled(true);
                 buttonRun.setEnabled(true);
+                updateLlvmUiState();
             } else {
                 currentFrame.highlightError(compiler.getErrorPosition());
                 runMenuItem.setEnabled(false);
                 buttonRun.setEnabled(false);
+                updateLlvmUiState();
             }
         }
     }//GEN-LAST:event_compileMenuItemActionPerformed
 
+    private void compileNativeMenuItemActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_compileNativeMenuItemActionPerformed
+        if (!compiler.isEmitLlvm()) {
+            JOptionPane.showMessageDialog(this,
+                    "Enable \"Emit LLVM IR\" before compiling to native.",
+                    "Native Compilation",
+                    JOptionPane.WARNING_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+        if (!compiler.hasLlvmModule()) {
+            JOptionPane.showMessageDialog(this,
+                    "Compile the program with \"Emit LLVM IR\" enabled before generating native code.",
+                    "Native Compilation",
+                    JOptionPane.INFORMATION_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+
+        FileFrame currentFrame = (FileFrame) desktopPane.getSelectedFrame();
+        if (currentFrame != null) {
+            currentFrame.selectConsole();
+            currentFrame.clearConsole();
+        }
+
+        output.setDelegate(delegateConsole);
+
+        setNativeActionsBusy(true);
+        Thread worker = new Thread(() -> {
+            NativeToolchain.Result result = null;
+            String error = null;
+            try {
+                result = compiler.compileNativeExecutable();
+                if (result != null) {
+                    System.out.println("Native toolchain command: " + String.join(" ", result.command()));
+                    System.out.println("Native toolchain exit code: " + result.exitCode());
+                }
+            } catch (IllegalStateException ex) {
+                error = ex.getMessage();
+            } catch (IOException ex) {
+                error = ex.getMessage();
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                error = "Native compilation interrupted.";
+            }
+
+            final NativeToolchain.Result finalResult = result;
+            final String finalError = error;
+            SwingUtilities.invokeLater(() -> {
+                if (finalError != null) {
+                    JOptionPane.showMessageDialog(Main.this,
+                            finalError,
+                            "Native Compilation",
+                            JOptionPane.ERROR_MESSAGE);
+                } else if (finalResult == null || !finalResult.isSuccess()) {
+                    int exit = (finalResult != null) ? finalResult.exitCode() : -1;
+                    JOptionPane.showMessageDialog(Main.this,
+                            "Native compilation failed (exit code " + exit + ").",
+                            "Native Compilation",
+                            JOptionPane.ERROR_MESSAGE);
+                } else {
+                    String executablePath = compiler.getLastNativeExecutablePath();
+                    if (executablePath != null) {
+                        System.out.println("Native executable written to " + executablePath);
+                    }
+                }
+                setNativeActionsBusy(false);
+            });
+        }, "triangle-native-compile");
+        worker.start();
+    }//GEN-LAST:event_compileNativeMenuItemActionPerformed
+
+    private void saveLlvmMenuItemActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_saveLlvmMenuItemActionPerformed
+        if (!compiler.hasLlvmModule()) {
+            JOptionPane.showMessageDialog(this,
+                    "No LLVM IR module is available. Compile with \"Emit LLVM IR\" enabled first.",
+                    "No LLVM IR",
+                    JOptionPane.INFORMATION_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+
+        JFileChooser chooser = new JFileChooser();
+        ExampleFileFilter filter = new ExampleFileFilter();
+        filter.setDescription("LLVM IR files");
+        filter.addExtension("ll");
+        chooser.setFileFilter(filter);
+        chooser.setCurrentDirectory(directory);
+
+        String suggestedPath = compiler.getLlvmOutputPath();
+        if (suggestedPath != null && !suggestedPath.isEmpty()) {
+            chooser.setSelectedFile(new File(suggestedPath));
+        }
+
+        if (chooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
+            File selected = chooser.getSelectedFile();
+            if (selected != null) {
+                if (!selected.getName().toLowerCase().endsWith(".ll")) {
+                    String name = selected.getName() + ".ll";
+                    File parent = selected.getParentFile();
+                    selected = (parent != null) ? new File(parent, name) : new File(name);
+                }
+
+                if (selected.exists()) {
+                    int overwrite = JOptionPane.showConfirmDialog(this,
+                            selected.getName() + " already exists.\nWould you like to replace it?",
+                            "Overwrite?",
+                            JOptionPane.YES_NO_OPTION);
+                    if (overwrite != JOptionPane.YES_OPTION) {
+                        return;
+                    }
+                }
+
+                try {
+                    compiler.saveLlvmModuleTo(selected);
+                    directory = chooser.getCurrentDirectory();
+                } catch (IOException | IllegalStateException ex) {
+                    JOptionPane.showMessageDialog(this,
+                            "An error occurred while trying to save the LLVM IR file:\n" + ex.getMessage(),
+                            "Error",
+                            JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        }
+
+        updateLlvmUiState();
+    }//GEN-LAST:event_saveLlvmMenuItemActionPerformed
+
+    private void saveAsmMenuItemActionPerformed(java.awt.event.ActionEvent evt) {
+        if (!compiler.isEmitLlvm()) {
+            JOptionPane.showMessageDialog(this,
+                    "Enable \"Emit LLVM IR\" first.",
+                    "Save Native Assembly",
+                    JOptionPane.WARNING_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+        if (!compiler.hasLlvmModule()) {
+            JOptionPane.showMessageDialog(this,
+                    "Compile the program with \"Emit LLVM IR\" enabled before saving assembly.",
+                    "Save Native Assembly",
+                    JOptionPane.INFORMATION_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+
+        JFileChooser chooser = new JFileChooser();
+        ExampleFileFilter filter = new ExampleFileFilter();
+        filter.setDescription("Assembly files");
+        filter.addExtension("s");
+        chooser.setFileFilter(filter);
+        chooser.setCurrentDirectory(directory);
+
+        String suggestedPath = compiler.getLlvmOutputPath();
+        if (suggestedPath != null && !suggestedPath.isEmpty()) {
+            // Suggest replacing .ll with .s
+            File suggested = new File(suggestedPath);
+            String name = suggested.getName();
+            int dot = name.lastIndexOf('.');
+            String asmName = (dot >= 0 ? name.substring(0, dot) : name) + ".s";
+            chooser.setSelectedFile(new File(suggested.getParentFile(), asmName));
+        }
+
+        if (chooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
+            File selected = chooser.getSelectedFile();
+            if (selected != null) {
+                if (!selected.getName().toLowerCase().endsWith(".s")) {
+                    selected = new File(selected.getParentFile(), selected.getName() + ".s");
+                }
+
+                if (selected.exists()) {
+                    int overwrite = JOptionPane.showConfirmDialog(this,
+                            selected.getName() + " already exists.\nWould you like to replace it?",
+                            "Overwrite?",
+                            JOptionPane.YES_NO_OPTION);
+                    if (overwrite != JOptionPane.YES_OPTION) {
+                        return;
+                    }
+                }
+
+                setNativeActionsBusy(true);
+                output.setDelegate(delegateConsole);
+                FileFrame currentFrame = (FileFrame) desktopPane.getSelectedFrame();
+                if (currentFrame != null) {
+                    currentFrame.selectConsole();
+                    currentFrame.clearConsole();
+                }
+
+                final File outFile = selected;
+                Thread worker = new Thread(() -> {
+                    Triangle.CodeGenerator.LLVM.NativeToolchain.Result result = null;
+                    String error = null;
+                    try {
+                        result = compiler.compileNativeAssemblyTo(outFile);
+                        if (result != null) {
+                            System.out.println("Native toolchain command: " + String.join(" ", result.command()));
+                            System.out.println("Native toolchain exit code: " + result.exitCode());
+                        }
+                    } catch (IllegalStateException ex) {
+                        error = ex.getMessage();
+                    } catch (IOException ex) {
+                        error = ex.getMessage();
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        error = "Assembly emission interrupted.";
+                    }
+
+                    final Triangle.CodeGenerator.LLVM.NativeToolchain.Result finalResult = result;
+                    final String finalError = error;
+                    SwingUtilities.invokeLater(() -> {
+                        if (finalError != null) {
+                            JOptionPane.showMessageDialog(Main.this,
+                                    finalError,
+                                    "Save Native Assembly",
+                                    JOptionPane.ERROR_MESSAGE);
+                        } else if (finalResult == null || !finalResult.isSuccess()) {
+                            int exit = (finalResult != null) ? finalResult.exitCode() : -1;
+                            JOptionPane.showMessageDialog(Main.this,
+                                    "Failed to generate assembly (exit code " + exit + ").",
+                                    "Save Native Assembly",
+                                    JOptionPane.ERROR_MESSAGE);
+                        } else {
+                            System.out.println("Assembly written to " + outFile.getAbsolutePath());
+                        }
+                        setNativeActionsBusy(false);
+                    });
+                }, "triangle-native-asm");
+                worker.start();
+            }
+        }
+
+        updateLlvmUiState();
+    }
+
+    private void saveObjMenuItemActionPerformed(java.awt.event.ActionEvent evt) {
+        if (!compiler.isEmitLlvm()) {
+            JOptionPane.showMessageDialog(this,
+                    "Enable \"Emit LLVM IR\" first.",
+                    "Save Native Object",
+                    JOptionPane.WARNING_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+        if (!compiler.hasLlvmModule()) {
+            JOptionPane.showMessageDialog(this,
+                    "Compile the program with \"Emit LLVM IR\" enabled before saving object file.",
+                    "Save Native Object",
+                    JOptionPane.INFORMATION_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+
+        JFileChooser chooser = new JFileChooser();
+        ExampleFileFilter filter = new ExampleFileFilter();
+        filter.setDescription("Object files");
+        filter.addExtension("o");
+        filter.addExtension("obj");
+        chooser.setFileFilter(filter);
+        chooser.setCurrentDirectory(directory);
+
+        String suggestedPath = compiler.getLlvmOutputPath();
+        if (suggestedPath != null && !suggestedPath.isEmpty()) {
+            File suggested = new File(suggestedPath);
+            String name = suggested.getName();
+            int dot = name.lastIndexOf('.');
+            String base = (dot >= 0 ? name.substring(0, dot) : name);
+            String objExt = isWindows() ? ".obj" : ".o";
+            chooser.setSelectedFile(new File(suggested.getParentFile(), base + objExt));
+        }
+
+        if (chooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
+            File selected = chooser.getSelectedFile();
+            if (selected != null) {
+                String lower = selected.getName().toLowerCase();
+                if (!(lower.endsWith(".o") || lower.endsWith(".obj"))) {
+                    selected = new File(selected.getParentFile(), selected.getName() + (isWindows() ? ".obj" : ".o"));
+                }
+
+                if (selected.exists()) {
+                    int overwrite = JOptionPane.showConfirmDialog(this,
+                            selected.getName() + " already exists.\nWould you like to replace it?",
+                            "Overwrite?",
+                            JOptionPane.YES_NO_OPTION);
+                    if (overwrite != JOptionPane.YES_OPTION) {
+                        return;
+                    }
+                }
+
+                setNativeActionsBusy(true);
+                output.setDelegate(delegateConsole);
+                FileFrame currentFrame = (FileFrame) desktopPane.getSelectedFrame();
+                if (currentFrame != null) {
+                    currentFrame.selectConsole();
+                    currentFrame.clearConsole();
+                }
+
+                final File outFile = selected;
+                Thread worker = new Thread(() -> {
+                    Triangle.CodeGenerator.LLVM.NativeToolchain.Result result = null;
+                    String error = null;
+                    try {
+                        result = compiler.compileNativeObjectTo(outFile);
+                        if (result != null) {
+                            System.out.println("Native toolchain command: " + String.join(" ", result.command()));
+                            System.out.println("Native toolchain exit code: " + result.exitCode());
+                        }
+                    } catch (IllegalStateException ex) {
+                        error = ex.getMessage();
+                    } catch (IOException ex) {
+                        error = ex.getMessage();
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        error = "Object emission interrupted.";
+                    }
+
+                    final Triangle.CodeGenerator.LLVM.NativeToolchain.Result finalResult = result;
+                    final String finalError = error;
+                    SwingUtilities.invokeLater(() -> {
+                        if (finalError != null) {
+                            JOptionPane.showMessageDialog(Main.this,
+                                    finalError,
+                                    "Save Native Object",
+                                    JOptionPane.ERROR_MESSAGE);
+                        } else if (finalResult == null || !finalResult.isSuccess()) {
+                            int exit = (finalResult != null) ? finalResult.exitCode() : -1;
+                            JOptionPane.showMessageDialog(Main.this,
+                                    "Failed to generate object file (exit code " + exit + ").",
+                                    "Save Native Object",
+                                    JOptionPane.ERROR_MESSAGE);
+                        } else {
+                            System.out.println("Object file written to " + outFile.getAbsolutePath());
+                        }
+                        setNativeActionsBusy(false);
+                    });
+                }, "triangle-native-obj");
+                worker.start();
+            }
+        }
+
+        updateLlvmUiState();
+    }
+
     private void llvmMenuItemActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_llvmMenuItemActionPerformed
         compiler.setEmitLlvm(llvmMenuItem.isSelected());
+        if (!llvmMenuItem.isSelected()) {
+            compiler.clearNativeArtifacts();
+        }
+        updateLlvmUiState();
     }//GEN-LAST:event_llvmMenuItemActionPerformed
+
+    private void runNativeMenuItemActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_runNativeMenuItemActionPerformed
+        if (!compiler.hasNativeExecutable()) {
+            JOptionPane.showMessageDialog(this,
+                    "No native executable available. Compile to native first.",
+                    "Native Execution",
+                    JOptionPane.INFORMATION_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+
+        File executable = compiler.getNativeExecutableFile();
+        if (executable == null || !executable.isFile()) {
+            JOptionPane.showMessageDialog(this,
+                    "The native executable could not be found on disk.",
+                    "Native Execution",
+                    JOptionPane.ERROR_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+
+        FileFrame currentFrame = (FileFrame) desktopPane.getSelectedFrame();
+        if (currentFrame != null) {
+            currentFrame.selectConsole();
+            currentFrame.clearConsole();
+        }
+
+        output.setDelegate(delegateConsole);
+
+        setNativeExecutionRunning(true);
+        Thread worker = new Thread(() -> {
+            int exitCode = -1;
+            String error = null;
+            try {
+                ProcessBuilder builder = new ProcessBuilder(executable.getAbsolutePath());
+                File parent = executable.getParentFile();
+                if (parent != null) {
+                    builder.directory(parent);
+                }
+                builder.redirectErrorStream(true);
+                Process process = builder.start();
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        System.out.println(line);
+                    }
+                }
+                exitCode = process.waitFor();
+            } catch (IOException ex) {
+                error = ex.getMessage();
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                error = "Native execution interrupted.";
+            }
+
+            final int finalExitCode = exitCode;
+            final String finalError = error;
+            SwingUtilities.invokeLater(() -> {
+                setNativeExecutionRunning(false);
+                if (finalError != null) {
+                    JOptionPane.showMessageDialog(Main.this,
+                            "Failed to execute native binary:\n" + finalError,
+                            "Native Execution",
+                            JOptionPane.ERROR_MESSAGE);
+                } else if (finalExitCode != 0) {
+                    JOptionPane.showMessageDialog(Main.this,
+                            "Native program exited with code " + finalExitCode + ".",
+                            "Native Execution",
+                            JOptionPane.WARNING_MESSAGE);
+                } else {
+                    System.out.println("Native program finished successfully.");
+                }
+            });
+        }, "triangle-native-run");
+        worker.start();
+    }//GEN-LAST:event_runNativeMenuItemActionPerformed
+
+    private void viewLlvmMenuItemActionPerformed(java.awt.event.ActionEvent evt) {
+        if (!compiler.hasLlvmModule()) {
+            JOptionPane.showMessageDialog(this,
+                    "No LLVM IR module is available. Compile with \"Emit LLVM IR\" enabled first.",
+                    "No LLVM IR",
+                    JOptionPane.INFORMATION_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+        FileFrame currentFrame = (FileFrame) desktopPane.getSelectedFrame();
+        if (currentFrame != null) {
+            currentFrame.writeToLlvmModule(compiler.getLlvmModule());
+            currentFrame.selectLlvmModule();
+        }
+    }
+
+    private void optimizationMenuItemActionPerformed(java.awt.event.ActionEvent evt) {
+        String current = compiler.getOptimizationLevelName();
+        String[] options = new String[] {"NONE", "O1", "O2", "O3"};
+        String chosen = (String) JOptionPane.showInputDialog(
+                this,
+                "Select optimization level (applies to native toolchain):",
+                "Optimization",
+                JOptionPane.QUESTION_MESSAGE,
+                null,
+                options,
+                current != null ? current : "NONE");
+        if (chosen != null && !chosen.isEmpty()) {
+            compiler.setOptimizationLevelByName(chosen);
+        }
+    }
+
+    private void runNativeShellMenuItemActionPerformed(java.awt.event.ActionEvent evt) {
+        if (!compiler.hasNativeExecutable()) {
+            JOptionPane.showMessageDialog(this,
+                    "No native executable available. Compile to native first.",
+                    "Native Execution (Shell)",
+                    JOptionPane.INFORMATION_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+
+        File executable = compiler.getNativeExecutableFile();
+        if (executable == null || !executable.isFile()) {
+            JOptionPane.showMessageDialog(this,
+                    "The native executable could not be found on disk.",
+                    "Native Execution (Shell)",
+                    JOptionPane.ERROR_MESSAGE);
+            updateLlvmUiState();
+            return;
+        }
+
+        try {
+            if (isWindows()) {
+                // Create a temporary batch file to keep the console open after execution for user to see output.
+                String exePath = executable.getAbsolutePath();
+                File dir = executable.getParentFile();
+                File launcher = new File(dir, "run_native_triangle.bat");
+                try (java.io.BufferedWriter bw = new java.io.BufferedWriter(new java.io.FileWriter(launcher))) {
+                    bw.write("@echo off" + System.lineSeparator());
+                    bw.write("echo Running Triangle native executable..." + System.lineSeparator());
+                    bw.write("\"" + exePath + "\"" + System.lineSeparator());
+                    bw.write("echo." + System.lineSeparator());
+                    bw.write("echo --- Programa finalizado. Presione una tecla para cerrar ---" + System.lineSeparator());
+                    bw.write("pause" + System.lineSeparator());
+                } catch (Exception ioex) {
+                    // Fallback: just run without persistence.
+                }
+                new ProcessBuilder("cmd.exe", "/c", "start", "Triangle Program", launcher.getName())
+                        .directory(dir)
+                        .start();
+            } else {
+                // Attempt common terminals; silently ignore failures and escalate on total failure.
+                boolean launched = false;
+                String[] terminals = {"xterm", "gnome-terminal", "konsole"};
+                for (String term : terminals) {
+                    try {
+                        ProcessBuilder tb = new ProcessBuilder(term, executable.getAbsolutePath());
+                        tb.directory(executable.getParentFile());
+                        tb.start();
+                        launched = true;
+                        break;
+                    } catch (IOException ignore) { }
+                }
+                if (!launched) {
+                    throw new IOException("No suitable terminal found (tried xterm/gnome-terminal/konsole)");
+                }
+            }
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this,
+                    "Failed to launch shell: " + ex.getMessage(),
+                    "Native Execution (Shell)",
+                    JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private static boolean isWindows() {
+        String os = System.getProperty("os.name", "");
+        return os.toLowerCase().contains("win");
+    }
 
     /**
      * Handles the "Save" button and menu option.
@@ -884,6 +1566,14 @@ public class Main extends javax.swing.JFrame {
     javax.swing.JMenuItem openMenuItem;
     javax.swing.JMenuItem pasteMenuItem;
     javax.swing.JMenuItem runMenuItem;
+    javax.swing.JMenuItem runNativeMenuItem;
+    javax.swing.JMenuItem runNativeShellMenuItem;
+    javax.swing.JMenuItem compileNativeMenuItem;
+    javax.swing.JMenuItem saveLlvmMenuItem;
+    javax.swing.JMenuItem optimizationMenuItem;
+    javax.swing.JMenuItem saveAsmMenuItem;
+    javax.swing.JMenuItem saveObjMenuItem;
+    javax.swing.JMenuItem viewLlvmMenuItem;
     javax.swing.JMenuItem saveAsMenuItem;
     javax.swing.JMenuItem saveMenuItem;
     javax.swing.JSeparator separatorExit;

@@ -210,6 +210,15 @@ public class FileFrame extends javax.swing.JInternalFrame {
             llvmPane.setText(text);
         }
     }
+    
+    /**
+     * Selects the LLVM IR tab so it becomes visible to the user.
+     */
+    public void selectLlvmModule() {
+        if (llvmScroll != null) {
+            tabbedPane.setSelectedComponent(llvmScroll);
+        }
+    }
       
     /**
      * Sets the focus on the Console Panel.

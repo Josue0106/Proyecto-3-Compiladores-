@@ -2,8 +2,13 @@ package Triangle.CodeGenerator.LLVM;
 
 import Triangle.AbstractSyntaxTrees.*;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collections;
+import java.util.Deque;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -106,37 +111,686 @@ public final class LLVMGenerator {
 
   public Result generate(Program program, Request request) {
     Objects.requireNonNull(program, "program");
-    Request effectiveRequest = request != null ? request : Request.defaults();
+    Request effectiveRequest = (request != null) ? request : Request.defaults();
 
-    ModuleBuilder module = ModuleBuilder.hostDefaults("triangle");
-    module.addPrologue("source_filename = \"triangle\"");
-    module.addPrologue("; LLVM backend WIP: no executable semantics yet");
-    module.addPrologue("; optimization level: " + effectiveRequest.optimizationLevel());
-    if (effectiveRequest.emitObjectFile() || effectiveRequest.emitAssembly()) {
-      module.addPrologue("; TODO: object/assembly emission pending");
-    }
-
-    AstSummary.Summary summary = AstSummary.summarize(program);
-    module.addPrologue("; resumen AST");
-    for (String line : summary.commentLines()) {
-      module.addPrologue("; " + line);
-    }
-
-    ModuleBuilder.InternedString banner = module.internStringLiteral(
-        "LLVM backend en desarrollo\n" + summary.banner());
-    module.addDeclaration("declare i32 @puts(i8*)");
-
-    ModuleBuilder.FunctionBuilder main = module.newFunction("define i32 @main()");
-    main.emitLabel("entry");
-    String bannerArrayType = banner.arrayType();
-    main.emit("%msg_ptr = getelementptr inbounds " + bannerArrayType + ", " + bannerArrayType
-        + "* " + banner.symbol() + ", i32 0, i32 0");
-    main.emit("%call = call i32 @puts(i8* %msg_ptr)");
-    main.emit("ret i32 0");
-    main.seal();
-
-    return new Result(module.buildModule(), null, null);
+    LlvmModuleGenerator generator = new LlvmModuleGenerator(effectiveRequest);
+    String ir = generator.generate(program);
+    return new Result(ir, null, null);
   }
+
+  // --- Minimal LLVM backend implementation ---
+  private static final class LlvmModuleGenerator {
+
+    private final Request request;
+    private final ModuleBuilder module;
+    private final SymbolTable symbols = new SymbolTable();
+    private final NameMangler mangler = new NameMangler();
+    private final Builtins builtins;
+    private final Map<FuncDeclaration, FunctionInfo> functionCache = new IdentityHashMap<FuncDeclaration, FunctionInfo>();
+
+    LlvmModuleGenerator(Request request) {
+      this.request = request;
+      this.module = ModuleBuilder.hostDefaults("triangle");
+      this.builtins = new Builtins(module);
+      symbols.pushScope();
+      builtins.register(symbols);
+    }
+
+    String generate(Program program) {
+      module.addPrologue("source_filename = \"triangle\"");
+      module.addPrologue("; Triangle LLVM backend");
+      module.addPrologue("; optimization level: " + request.optimizationLevel());
+
+      // Promote top-level var/const to globals before building main.
+      collectTopLevelGlobals(program);
+
+      // int main() { <compile commands>; return 0; }
+      ModuleBuilder.FunctionBuilder mainBuilder = module.newFunction("define i32 @main()");
+      FunctionContext mainCtx = new FunctionContext(mainBuilder);
+      mainCtx.emitLabel("entry");
+
+      symbols.pushScope();
+      if (program.C != null) {
+        compileCommand(program.C, mainCtx);
+      }
+      symbols.popScope();
+
+      mainCtx.emit("ret i32 0");
+      mainCtx.seal();
+
+      symbols.popScope();
+      return module.buildModule();
+    }
+
+    private void collectTopLevelGlobals(Program program) {
+      // We scan the Program's command for leading Let declarations used as setup; for simplicity
+      // we only promote simple VarDeclaration / ConstDeclaration at the outermost level (no nested lets).
+      if (program == null || program.C == null) return;
+      // A heuristic: if the top-level command starts with a LetCommand, harvest its declarations recursively.
+      harvestGlobalsFromCommand(program.C);
+    }
+
+    private void harvestGlobalsFromCommand(Command command) {
+      if (command instanceof LetCommand) {
+        LetCommand let = (LetCommand) command;
+        harvestGlobalsFromDeclaration(let.D);
+        // Continue into inner command to catch chained lets.
+        harvestGlobalsFromCommand(let.C);
+      } else if (command instanceof SequentialCommand) {
+        SequentialCommand seq = (SequentialCommand) command;
+        harvestGlobalsFromCommand(seq.C1);
+        harvestGlobalsFromCommand(seq.C2);
+      }
+    }
+
+    private void harvestGlobalsFromDeclaration(Declaration decl) {
+      if (decl instanceof SequentialDeclaration) {
+        SequentialDeclaration seq = (SequentialDeclaration) decl;
+        harvestGlobalsFromDeclaration(seq.D1);
+        harvestGlobalsFromDeclaration(seq.D2);
+        return;
+      }
+      if (decl instanceof ConstDeclaration) {
+        ConstDeclaration c = (ConstDeclaration) decl;
+        // We can only evaluate simple integer expressions at global init time for now.
+        Integer initValue = tryEvaluateIntExpression(c.E);
+        if (initValue != null) {
+          String gName = globalName(c.I.spelling);
+          module.addGlobal(gName + " = constant i32 " + initValue);
+          symbols.define(new VariableSymbol(c.I.spelling, TypeInfo.INT, gName, true));
+        }
+        return;
+      }
+      if (decl instanceof VarDeclaration) {
+        VarDeclaration v = (VarDeclaration) decl;
+        // Default initialize to 0; only int supported globally for now.
+        String gName = globalName(v.I.spelling);
+        module.addGlobal(gName + " = global i32 0");
+        symbols.define(new VariableSymbol(v.I.spelling, TypeInfo.INT, gName, false));
+        return;
+      }
+      // Ignore other forms (functions stay local to codegen path, let blocks deeper not promoted)
+    }
+
+    private String globalName(String source) {
+      return "@g$" + mangler.mangle(source);
+    }
+
+    private Integer tryEvaluateIntExpression(Expression e) {
+      if (e instanceof IntegerExpression) {
+        IntegerExpression ie = (IntegerExpression) e;
+        if (ie.IL != null) {
+          try { return Integer.parseInt(ie.IL.spelling); } catch (NumberFormatException ex) { return null; }
+        }
+        return 0;
+      }
+      return null; // Non-constant or unsupported expression
+    }
+
+    private void compileCommand(Command command, FunctionContext ctx) {
+      if (command == null || command instanceof EmptyCommand) {
+        return;
+      }
+      if (command instanceof SequentialCommand) {
+        SequentialCommand seq = (SequentialCommand) command;
+        compileCommand(seq.C1, ctx);
+        compileCommand(seq.C2, ctx);
+        return;
+      }
+      if (command instanceof LetCommand) {
+        LetCommand let = (LetCommand) command;
+        symbols.pushScope();
+        compileDeclaration(let.D, ctx);
+        compileCommand(let.C, ctx);
+        symbols.popScope();
+        return;
+      }
+      if (command instanceof CallCommand) {
+        CallCommand call = (CallCommand) command;
+        compileCall(ctx, call.I, call.APS, false);
+        return;
+      }
+      if (command instanceof AssignCommand) {
+        // V := E
+        AssignCommand assign = (AssignCommand) command;
+        ValueRef value = compileExpression(assign.E, ctx);
+        VariableSymbol target = resolveVariable(assign.V);
+        // For now only simple variables (no field/array selectors yet)
+        ctx.emit("store " + value.type.llvm + " " + value.ref + ", " + value.type.llvm + "* " + target.pointer);
+        return;
+      }
+      if (command instanceof IfCommand) {
+        IfCommand ic = (IfCommand) command;
+        // Compile condition (treat non‑zero as true). For now we assume integer conditions.
+        ValueRef condVal = compileExpression(ic.E, ctx);
+        String zeroCmp = ctx.newTemp();
+        ctx.emit(zeroCmp + " = icmp ne " + condVal.type.llvm + " " + condVal.ref + ", 0");
+        String thenLabel = ctx.newLabel("if.then");
+        String elseLabel = ctx.newLabel("if.else");
+        String endLabel = ctx.newLabel("if.end");
+        boolean hasElse = ic.C2 != null && !(ic.C2 instanceof EmptyCommand);
+        ctx.emit("br i1 " + zeroCmp + ", label %" + thenLabel + ", label %" + (hasElse ? elseLabel : endLabel));
+        // then block
+        ctx.emitLabel(thenLabel);
+        compileCommand(ic.C1, ctx);
+        ctx.emit("br label %" + endLabel);
+        // else block
+        if (hasElse) {
+          ctx.emitLabel(elseLabel);
+            compileCommand(ic.C2, ctx);
+            ctx.emit("br label %" + endLabel);
+        }
+        // end
+        ctx.emitLabel(endLabel);
+        return;
+      }
+      if (command instanceof WhileCommand) {
+        WhileCommand wc = (WhileCommand) command;
+        String condLabel = ctx.newLabel("while.cond");
+        String bodyLabel = ctx.newLabel("while.body");
+        String endLabel = ctx.newLabel("while.end");
+        // jump to condition first
+        ctx.emit("br label %" + condLabel);
+        ctx.emitLabel(condLabel);
+        ValueRef condVal = compileExpression(wc.E, ctx);
+        String cmp = ctx.newTemp();
+        ctx.emit(cmp + " = icmp ne " + condVal.type.llvm + " " + condVal.ref + ", 0");
+        ctx.emit("br i1 " + cmp + ", label %" + bodyLabel + ", label %" + endLabel);
+        ctx.emitLabel(bodyLabel);
+        compileCommand(wc.C, ctx);
+        ctx.emit("br label %" + condLabel);
+        ctx.emitLabel(endLabel);
+        return;
+      }
+      throw new UnsupportedOperationException("Unsupported command: " + command.getClass().getSimpleName());
+    }
+
+    private VariableSymbol resolveVariable(Vname V) {
+      // Only simple identifier vnames supported right now.
+      if (V instanceof SimpleVname) {
+        SimpleVname sv = (SimpleVname) V;
+        Symbol sym = symbols.lookup(sv.I.spelling);
+        if (sym instanceof VariableSymbol) {
+          return (VariableSymbol) sym;
+        }
+        throw new IllegalStateException("'" + sv.I.spelling + "' no es una variable");
+      }
+      throw new UnsupportedOperationException("Solo variables simples soportadas por ahora");
+    }
+
+    private void compileDeclaration(Declaration declaration, FunctionContext ctx) {
+      if (declaration == null) {
+        return;
+      }
+      if (declaration instanceof SequentialDeclaration) {
+        SequentialDeclaration seq = (SequentialDeclaration) declaration;
+        compileDeclaration(seq.D1, ctx);
+        compileDeclaration(seq.D2, ctx);
+        return;
+      }
+      if (declaration instanceof ConstDeclaration) {
+        ConstDeclaration c = (ConstDeclaration) declaration;
+        ValueRef value = compileExpression(c.E, ctx);
+        String ptr = ctx.createAlloca(value.type);
+        ctx.emit("store " + value.type.llvm + " " + value.ref + ", " + value.type.llvm + "* " + ptr);
+        symbols.define(new VariableSymbol(c.I.spelling, value.type, ptr, true));
+        return;
+      }
+      if (declaration instanceof VarDeclaration) {
+        VarDeclaration v = (VarDeclaration) declaration;
+        TypeInfo type = typeInfoFor(v.T);
+        String ptr = ctx.createAlloca(type);
+        ctx.emit("store " + type.llvm + " " + defaultValue(type) + ", " + type.llvm + "* " + ptr);
+        symbols.define(new VariableSymbol(v.I.spelling, type, ptr, false));
+        return;
+      }
+      if (declaration instanceof FuncDeclaration) {
+        FuncDeclaration f = (FuncDeclaration) declaration;
+        FunctionInfo info = ensureFunctionInfo(f);
+        symbols.define(new FunctionSymbol(f.I.spelling, info));
+        defineFunctionBody(info, f);
+        return;
+      }
+      // Other declaration forms are not supported yet
+      throw new UnsupportedOperationException("Unsupported declaration: " + declaration.getClass().getSimpleName());
+    }
+
+    private FunctionInfo ensureFunctionInfo(FuncDeclaration decl) {
+      FunctionInfo cached = functionCache.get(decl);
+      if (cached != null) {
+        return cached;
+      }
+      String base = (decl.I != null) ? decl.I.spelling : "anon";
+      String llvmName = "@triangle$" + mangler.mangle(base);
+      TypeInfo ret = typeInfoFor(decl.T);
+      List<ParameterSpec> params = collectFormalParameters(decl.FPS);
+      List<TypeInfo> paramTypes = new ArrayList<TypeInfo>();
+      for (ParameterSpec p : params) {
+        paramTypes.add(p.type);
+      }
+      FunctionInfo info = new FunctionInfo(base, llvmName, ret, paramTypes, params, false, decl);
+      functionCache.put(decl, info);
+      return info;
+    }
+
+    private List<ParameterSpec> collectFormalParameters(FormalParameterSequence seq) {
+      List<ParameterSpec> specs = new ArrayList<ParameterSpec>();
+      collectFormalParameters(seq, specs);
+      return specs;
+    }
+
+    private void collectFormalParameters(FormalParameterSequence seq, List<ParameterSpec> out) {
+      if (seq == null || seq instanceof EmptyFormalParameterSequence) {
+        return;
+      }
+      if (seq instanceof SingleFormalParameterSequence) {
+        SingleFormalParameterSequence s = (SingleFormalParameterSequence) seq;
+        out.add(parameterSpec(s.FP));
+        return;
+      }
+      if (seq instanceof MultipleFormalParameterSequence) {
+        MultipleFormalParameterSequence m = (MultipleFormalParameterSequence) seq;
+        out.add(parameterSpec(m.FP));
+        collectFormalParameters(m.FPS, out);
+        return;
+      }
+      throw new UnsupportedOperationException("Unsupported parameter sequence: " + seq.getClass().getSimpleName());
+    }
+
+    private ParameterSpec parameterSpec(FormalParameter fp) {
+      if (fp instanceof ConstFormalParameter) {
+        ConstFormalParameter c = (ConstFormalParameter) fp;
+        TypeInfo type = typeInfoFor(c.T);
+        return new ParameterSpec(c.I.spelling, type);
+      }
+      if (fp instanceof FuncFormalParameter) {
+        FuncFormalParameter f = (FuncFormalParameter) fp;
+        List<ParameterSpec> nested = collectFormalParameters(f.FPS);
+        List<TypeInfo> nestedTypes = new ArrayList<TypeInfo>();
+        for (ParameterSpec s : nested) {
+          nestedTypes.add(s.type);
+        }
+        TypeInfo ret = typeInfoFor(f.T);
+        TypeInfo type = TypeInfo.functionPointer(ret, nestedTypes);
+        return new ParameterSpec(f.I.spelling, type);
+      }
+      throw new UnsupportedOperationException("Unsupported formal parameter: " + fp.getClass().getSimpleName());
+    }
+
+    private void defineFunctionBody(FunctionInfo info, FuncDeclaration decl) {
+      if (info.defined) {
+        return;
+      }
+      StringBuilder sig = new StringBuilder();
+      sig.append("define ").append(info.returnType.llvm).append(" ")
+         .append(info.llvmName).append("(");
+      for (int i = 0; i < info.parameters.size(); i++) {
+        if (i > 0) sig.append(", ");
+        sig.append(info.parameters.get(i).type.llvm).append(" %arg").append(i);
+      }
+      sig.append(")");
+
+      ModuleBuilder.FunctionBuilder fn = module.newFunction(sig.toString());
+      FunctionContext ctx = new FunctionContext(fn);
+      ctx.emitLabel("entry");
+
+      symbols.pushScope();
+      for (int i = 0; i < info.parameters.size(); i++) {
+        ParameterSpec p = info.parameters.get(i);
+        String ptr = ctx.createAlloca(p.type);
+        ctx.emit("store " + p.type.llvm + " %arg" + i + ", " + p.type.llvm + "* " + ptr);
+        symbols.define(new VariableSymbol(p.name, p.type, ptr, true));
+      }
+
+      ValueRef result = compileExpression(decl.E, ctx);
+      ctx.emit("ret " + info.returnType.llvm + " " + result.ref);
+
+      symbols.popScope();
+      ctx.seal();
+      info.defined = true;
+    }
+
+    private ValueRef compileExpression(Expression e, FunctionContext ctx) {
+      if (e instanceof IntegerExpression) {
+        IntegerExpression ie = (IntegerExpression) e;
+        int value = 0;
+        if (ie.IL != null) {
+          try { value = Integer.parseInt(ie.IL.spelling); } catch (NumberFormatException ex) {
+            throw new IllegalStateException("Invalid integer literal: " + ie.IL.spelling, ex);
+          }
+        }
+        return new ValueRef(TypeInfo.INT, Integer.toString(value));
+      }
+      if (e instanceof VnameExpression) {
+        VnameExpression ve = (VnameExpression) e;
+        return loadVname(ve.V, ctx);
+      }
+      if (e instanceof BinaryExpression) {
+        BinaryExpression be = (BinaryExpression) e;
+        ValueRef left = compileExpression(be.E1, ctx);
+        ValueRef right = compileExpression(be.E2, ctx);
+        return emitBinary(be.O, left, right, ctx);
+      }
+      if (e instanceof CallExpression) {
+        CallExpression ce = (CallExpression) e;
+        return compileCall(ctx, ce.I, ce.APS, true);
+      }
+      if (e instanceof LetExpression) {
+        LetExpression le = (LetExpression) e;
+        symbols.pushScope();
+        compileDeclaration(le.D, ctx);
+        ValueRef v = compileExpression(le.E, ctx);
+        symbols.popScope();
+        return v;
+      }
+      throw new UnsupportedOperationException("Unsupported expression: " + e.getClass().getSimpleName());
+    }
+
+    private ValueRef emitBinary(Operator op, ValueRef left, ValueRef right, FunctionContext ctx) {
+      String o = (op != null) ? op.spelling : "";
+      // Arithmetic
+      if ("+".equals(o) || "-".equals(o) || "*".equals(o) || "/".equals(o)) {
+        String instr;
+        if ("+".equals(o)) instr = "add";
+        else if ("-".equals(o)) instr = "sub";
+        else if ("*".equals(o)) instr = "mul";
+        else instr = "sdiv"; // '/'
+        String t = ctx.newTemp();
+        ctx.emit(t + " = " + instr + " " + left.type.llvm + " " + left.ref + ", " + right.ref);
+        return new ValueRef(left.type, t);
+      }
+      // Relational -> produce i32 0/1 for now (Triangle booleans still lowered to int)
+      if ("<".equals(o) || "<=".equals(o) || ">".equals(o) || ">=".equals(o) || "=".equals(o) || "!=".equals(o)) {
+        String pred;
+        if ("<".equals(o)) pred = "slt";
+        else if ("<=".equals(o)) pred = "sle";
+        else if (">".equals(o)) pred = "sgt";
+        else if (">=".equals(o)) pred = "sge";
+        else if ("=".equals(o)) pred = "eq";
+        else pred = "ne";
+        String boolTemp = ctx.newTemp();
+        ctx.emit(boolTemp + " = icmp " + pred + " " + left.type.llvm + " " + left.ref + ", " + right.ref);
+        // Extend i1 -> i32 so the rest of pipeline treats booleans as ints
+        String ext = ctx.newTemp();
+        ctx.emit(ext + " = zext i1 " + boolTemp + " to i32");
+        return new ValueRef(TypeInfo.INT, ext);
+      }
+      throw new UnsupportedOperationException("Unsupported binary operator: " + o);
+    }
+
+    private ValueRef compileCall(FunctionContext ctx, Identifier id, ActualParameterSequence aps, boolean expectResult) {
+      String name = (id != null) ? id.spelling : "";
+      if (builtins.isBuiltin(name)) {
+        List<ValueRef> args = collectActualParameters(aps, ctx);
+        return builtins.emit(name, args, expectResult, ctx);
+      }
+      CallableTarget target = resolveCallable(name, ctx);
+      List<ValueRef> args = collectActualParameters(aps, ctx);
+      StringBuilder call = new StringBuilder();
+      if (!target.info.returnType.isVoid()) {
+        String t = ctx.newTemp();
+        call.append(t).append(" = ");
+        call.append("call ").append(target.info.returnType.llvm).append(" ")
+            .append(target.pointer).append("(");
+        appendArguments(call, args);
+        call.append(")");
+        ctx.emit(call.toString());
+        return new ValueRef(target.info.returnType, t);
+      }
+      call.append("call ").append(target.info.returnType.llvm).append(" ")
+          .append(target.pointer).append("(");
+      appendArguments(call, args);
+      call.append(")");
+      ctx.emit(call.toString());
+      return ValueRef.VOID;
+    }
+
+    private void appendArguments(StringBuilder call, List<ValueRef> args) {
+      for (int i = 0; i < args.size(); i++) {
+        if (i > 0) call.append(", ");
+        ValueRef a = args.get(i);
+        call.append(a.type.llvm).append(" ").append(a.ref);
+      }
+    }
+
+    private CallableTarget resolveCallable(String name, FunctionContext ctx) {
+      Symbol sym = symbols.lookup(name);
+      if (sym instanceof FunctionSymbol) {
+        FunctionSymbol fs = (FunctionSymbol) sym;
+        return new CallableTarget(fs.info, fs.info.llvmName);
+      }
+      if (sym instanceof VariableSymbol) {
+        VariableSymbol vs = (VariableSymbol) sym;
+        if (!vs.type.isFunctionPointer()) {
+          throw new IllegalStateException("Symbol '" + name + "' is not callable");
+        }
+        ValueRef ptr = loadPointer(vs, ctx);
+        return new CallableTarget(FunctionInfo.forPointer(vs.type), ptr.ref);
+      }
+      throw new IllegalStateException("Unknown function: " + name);
+    }
+
+    private List<ValueRef> collectActualParameters(ActualParameterSequence seq, FunctionContext ctx) {
+      List<ValueRef> values = new ArrayList<ValueRef>();
+      collectActualParameters(seq, values, ctx);
+      return values;
+    }
+
+    private void collectActualParameters(ActualParameterSequence seq, List<ValueRef> out, FunctionContext ctx) {
+      if (seq == null || seq instanceof EmptyActualParameterSequence) {
+        return;
+      }
+      if (seq instanceof SingleActualParameterSequence) {
+        SingleActualParameterSequence s = (SingleActualParameterSequence) seq;
+        out.add(compileActualParameter(s.AP, ctx));
+        return;
+      }
+      if (seq instanceof MultipleActualParameterSequence) {
+        MultipleActualParameterSequence m = (MultipleActualParameterSequence) seq;
+        out.add(compileActualParameter(m.AP, ctx));
+        collectActualParameters(m.APS, out, ctx);
+        return;
+      }
+      throw new UnsupportedOperationException("Unsupported actual parameter sequence: " + seq.getClass().getSimpleName());
+    }
+
+    private ValueRef compileActualParameter(ActualParameter ap, FunctionContext ctx) {
+      if (ap instanceof ConstActualParameter) {
+        ConstActualParameter c = (ConstActualParameter) ap;
+        return compileExpression(c.E, ctx);
+      }
+      if (ap instanceof FuncActualParameter) {
+        FuncActualParameter f = (FuncActualParameter) ap;
+        return resolveFunctionPointer(f.I);
+      }
+      throw new UnsupportedOperationException("Unsupported actual parameter: " + ap.getClass().getSimpleName());
+    }
+
+    private ValueRef resolveFunctionPointer(Identifier id) {
+      String name = (id != null) ? id.spelling : "";
+      Symbol sym = symbols.lookup(name);
+      if (sym instanceof FunctionSymbol) {
+        FunctionSymbol fs = (FunctionSymbol) sym;
+        return new ValueRef(fs.info.pointerType(), fs.info.llvmName);
+      }
+      if (sym instanceof VariableSymbol) {
+        VariableSymbol vs = (VariableSymbol) sym;
+        if (!vs.type.isFunctionPointer()) {
+          throw new IllegalStateException("Symbol '" + name + "' is not a function");
+        }
+        throw new UnsupportedOperationException("Passing function variables is not yet supported");
+      }
+      throw new IllegalStateException("Unknown function: " + name);
+    }
+
+    private ValueRef loadVname(Vname v, FunctionContext ctx) {
+      if (v instanceof SimpleVname) {
+        SimpleVname s = (SimpleVname) v;
+        String name = (s.I != null) ? s.I.spelling : "";
+        Symbol sym = symbols.lookup(name);
+        if (sym instanceof VariableSymbol) {
+          return loadVariable((VariableSymbol) sym, ctx);
+        }
+        if (sym instanceof FunctionSymbol) {
+          FunctionSymbol fs = (FunctionSymbol) sym;
+          return new ValueRef(fs.info.pointerType(), fs.info.llvmName);
+        }
+        throw new IllegalStateException("Unknown identifier: " + name);
+      }
+      throw new UnsupportedOperationException("Unsupported vname: " + v.getClass().getSimpleName());
+    }
+
+    private ValueRef loadVariable(VariableSymbol var, FunctionContext ctx) {
+      String t = ctx.newTemp();
+      ctx.emit(t + " = load " + var.type.llvm + ", " + var.type.llvm + "* " + var.pointer);
+      return new ValueRef(var.type, t);
+    }
+
+    private ValueRef loadPointer(VariableSymbol var, FunctionContext ctx) {
+      String t = ctx.newTemp();
+      ctx.emit(t + " = load " + var.type.llvm + ", " + var.type.llvm + "* " + var.pointer);
+      return new ValueRef(var.type, t);
+    }
+
+    private TypeInfo typeInfoFor(TypeDenoter t) {
+      if (t == null || t instanceof IntTypeDenoter) return TypeInfo.INT;
+      if (t instanceof CharTypeDenoter) return TypeInfo.CHAR;
+      if (t instanceof BoolTypeDenoter) return TypeInfo.BOOL;
+      throw new UnsupportedOperationException("Unsupported type denoter: " + (t != null ? t.getClass().getSimpleName() : "null"));
+    }
+
+    private String defaultValue(TypeInfo t) {
+      if (t == TypeInfo.INT || t == TypeInfo.BOOL || t == TypeInfo.CHAR) return "0";
+      throw new UnsupportedOperationException("Unsupported default value for type: " + t);
+    }
+  }
+
+  private static final class FunctionContext {
+    private final ModuleBuilder.FunctionBuilder builder;
+    private int tempCounter = 0;
+    private int labelCounter = 0;
+
+    FunctionContext(ModuleBuilder.FunctionBuilder builder) { this.builder = builder; }
+    void emitLabel(String label) { builder.emitLabel(label); }
+    void emit(String line) { builder.emit(line); }
+    String newTemp() { return "%t" + (tempCounter++); }
+    String newLabel(String prefix) { return prefix + "." + (labelCounter++); }
+    String createAlloca(TypeInfo type) { String p = newTemp(); emit(p + " = alloca " + type.llvm); return p; }
+    ValueRef constantPointer(ModuleBuilder.InternedString lit) {
+      String t = newTemp();
+      emit(t + " = getelementptr inbounds " + lit.arrayType() + ", " + lit.arrayType() + "* " + lit.symbol() + ", i32 0, i32 0");
+      return new ValueRef(TypeInfo.I8_PTR, t);
+    }
+    void seal() { builder.seal(); }
+  }
+
+  private static final class CallableTarget { final FunctionInfo info; final String pointer; CallableTarget(FunctionInfo i, String p){info=i;pointer=p;} }
+  private static final class ValueRef { static final ValueRef VOID = new ValueRef(TypeInfo.VOID, "void"); final TypeInfo type; final String ref; ValueRef(TypeInfo t,String r){type=t;ref=r;} }
+  private static final class ParameterSpec { final String name; final TypeInfo type; ParameterSpec(String n, TypeInfo t){ this.name = n; this.type = t; } }
+
+  private static final class FunctionInfo {
+    final String sourceName; final String llvmName; final TypeInfo returnType; final List<TypeInfo> parameterTypes; final List<ParameterSpec> parameters; final boolean builtin; final FuncDeclaration owner; boolean defined;
+    FunctionInfo(String s, String l, TypeInfo r, List<TypeInfo> pts, List<ParameterSpec> ps, boolean b, FuncDeclaration o){sourceName=s;llvmName=l;returnType=r;parameterTypes=pts;parameters=ps;builtin=b;owner=o;}
+    TypeInfo pointerType(){ return TypeInfo.functionPointer(returnType, parameterTypes); }
+    static FunctionInfo forPointer(TypeInfo t){ return new FunctionInfo("<pointer>", "", t.returnType, t.parameterTypes, Collections.<ParameterSpec>emptyList(), false, null); }
+  }
+
+  private static final class TypeInfo {
+    static final TypeInfo INT = new TypeInfo("i32");
+    static final TypeInfo CHAR = new TypeInfo("i8");
+    static final TypeInfo BOOL = new TypeInfo("i1");
+    static final TypeInfo VOID = new TypeInfo("void");
+    static final TypeInfo I8_PTR = new TypeInfo("i8*");
+    final String llvm; final TypeInfo returnType; final List<TypeInfo> parameterTypes;
+    private TypeInfo(String l){ this(l, null, Collections.<TypeInfo>emptyList()); }
+    private TypeInfo(String l, TypeInfo r, List<TypeInfo> ps){ llvm=l; returnType=r; parameterTypes=ps; }
+    static TypeInfo functionPointer(TypeInfo r, List<TypeInfo> ps){ StringBuilder sb=new StringBuilder(); sb.append(r.llvm).append(" ("); for(int i=0;i<ps.size();i++){ if(i>0) sb.append(", "); sb.append(ps.get(i).llvm);} sb.append(")*"); return new TypeInfo(sb.toString(), r, ps); }
+    boolean isFunctionPointer(){ return returnType != null; }
+    boolean isVoid(){ return this == VOID; }
+  }
+
+  private static final class Builtins {
+    private final ModuleBuilder module;
+    private final ModuleBuilder.InternedString intPrintFormat;
+    private final ModuleBuilder.InternedString intScanFormat;
+    private final FunctionInfo putIntInfo;
+    private final FunctionInfo getIntInfo;
+    private final FunctionInfo getCharInfo;
+    private final FunctionInfo putCharInfo;
+
+    Builtins(ModuleBuilder m){
+      module = m;
+  // Use real newline in the Java literal; ModuleBuilder will encode it as \0A for LLVM IR
+  intPrintFormat = module.internStringLiteral("%d\n");
+      intScanFormat = module.internStringLiteral("%d");
+      module.addDeclaration("declare i32 @printf(i8*, ...)");
+      module.addDeclaration("declare i32 @scanf(i8*, ...)");
+      module.addDeclaration("declare i32 @getchar()");
+      module.addDeclaration("declare i32 @putchar(i32)");
+      putIntInfo = new FunctionInfo("putint", "@triangle$builtin.putint", TypeInfo.VOID, Collections.<TypeInfo>singletonList(TypeInfo.INT), Collections.<ParameterSpec>emptyList(), true, null);
+      getIntInfo = new FunctionInfo("getint", "@triangle$builtin.getint", TypeInfo.INT, Collections.<TypeInfo>emptyList(), Collections.<ParameterSpec>emptyList(), true, null);
+      getCharInfo = new FunctionInfo("getchar", "@triangle$builtin.getchar", TypeInfo.INT, Collections.<TypeInfo>emptyList(), Collections.<ParameterSpec>emptyList(), true, null);
+      putCharInfo = new FunctionInfo("putchar", "@triangle$builtin.putchar", TypeInfo.VOID, Collections.<TypeInfo>singletonList(TypeInfo.INT), Collections.<ParameterSpec>emptyList(), true, null);
+    }
+
+    void register(SymbolTable symbols){
+      symbols.define(new FunctionSymbol("putint", putIntInfo));
+      symbols.define(new FunctionSymbol("getint", getIntInfo));
+      symbols.define(new FunctionSymbol("getchar", getCharInfo));
+      symbols.define(new FunctionSymbol("putchar", putCharInfo));
+    }
+
+    boolean isBuiltin(String name){
+      return "putint".equals(name) || "getint".equals(name) || "getchar".equals(name) || "putchar".equals(name);
+    }
+
+    ValueRef emit(String name, List<ValueRef> args, boolean expectResult, FunctionContext ctx){
+      if ("putint".equals(name)) {
+        if (args.size() != 1) throw new IllegalStateException("putint expects exactly one argument");
+        ValueRef a = args.get(0);
+        ValueRef fmt = ctx.constantPointer(intPrintFormat);
+        ctx.emit("call i32 @printf(i8* " + fmt.ref + ", " + a.type.llvm + " " + a.ref + ")");
+        return ValueRef.VOID;
+      }
+      if ("getint".equals(name)) {
+        if (!expectResult) throw new IllegalStateException("getint must be used in an expression");
+        if (!args.isEmpty()) throw new IllegalStateException("getint takes no arguments");
+        String ptr = ctx.createAlloca(TypeInfo.INT);
+        ValueRef fmt = ctx.constantPointer(intScanFormat);
+        ctx.emit("call i32 @scanf(i8* " + fmt.ref + ", i32* " + ptr + ")");
+        String loaded = ctx.newTemp();
+        ctx.emit(loaded + " = load i32, i32* " + ptr);
+        return new ValueRef(TypeInfo.INT, loaded);
+      }
+      if ("getchar".equals(name)) {
+        if (!expectResult) throw new IllegalStateException("getchar must be used in an expression");
+        if (!args.isEmpty()) throw new IllegalStateException("getchar takes no arguments");
+        String t = ctx.newTemp();
+        ctx.emit(t + " = call i32 @getchar()");
+        return new ValueRef(TypeInfo.INT, t);
+      }
+      if ("putchar".equals(name)) {
+        if (args.size() != 1) throw new IllegalStateException("putchar expects exactly one argument");
+        ValueRef a = args.get(0);
+        ctx.emit("call i32 @putchar(i32 " + a.ref + ")");
+        return ValueRef.VOID;
+      }
+      throw new UnsupportedOperationException("Unknown builtin: " + name);
+    }
+  }
+
+  private static final class SymbolTable {
+    private final Deque<Map<String, Symbol>> scopes = new ArrayDeque< Map<String, Symbol> >();
+    void pushScope(){ scopes.push(new LinkedHashMap<String, Symbol>()); }
+    void popScope(){ scopes.pop(); }
+    void define(Symbol s){ Map<String, Symbol> cur = scopes.peek(); if (cur == null) throw new IllegalStateException("No active scope"); if (cur.containsKey(s.name)) throw new IllegalStateException("Duplicate symbol in scope: "+s.name); cur.put(s.name, s); }
+    Symbol lookup(String name){ for (Map<String, Symbol> scope : scopes){ Symbol s = scope.get(name); if (s != null) return s; } return null; }
+  }
+
+  private abstract static class Symbol { final String name; Symbol(String n){ name=n; } }
+  private static final class VariableSymbol extends Symbol { final TypeInfo type; final String pointer; final boolean constant; VariableSymbol(String n, TypeInfo t, String p, boolean c){ super(n); type=t; pointer=p; constant=c; } }
+  private static final class FunctionSymbol extends Symbol { final FunctionInfo info; FunctionSymbol(String n, FunctionInfo i){ super(n); info=i; } }
+  private static final class NameMangler { private final Map<String,Integer> counters = new LinkedHashMap<String,Integer>(); String mangle(String base){ Integer c = counters.get(base); int v = (c==null)?0:c.intValue(); counters.put(base, Integer.valueOf(v+1)); return (v==0)?base:(base+"$"+v); } }
 
   private static final class AstSummary {
 
