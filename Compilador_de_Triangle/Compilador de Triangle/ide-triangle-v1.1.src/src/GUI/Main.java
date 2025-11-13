@@ -569,7 +569,7 @@ public class Main extends javax.swing.JFrame {
         triangleMenu.add(saveLlvmMenuItem);
 
         optimizationMenuItem.setMnemonic('Z');
-        optimizationMenuItem.setText("Optimization…");
+        optimizationMenuItem.setText("Optimizations...");
         optimizationMenuItem.addActionListener(new java.awt.event.ActionListener() {
             public void actionPerformed(java.awt.event.ActionEvent evt) {
                 optimizationMenuItemActionPerformed(evt);

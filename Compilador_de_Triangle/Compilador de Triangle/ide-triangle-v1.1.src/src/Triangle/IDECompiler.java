@@ -302,7 +302,7 @@ public class IDECompiler {
             File suggestedPath = new File(replaceExtension(sourceName, ".ll"));
             lastLlvmOutputPath = suggestedPath.getAbsolutePath();
             lastNativeExecutablePath = null;
-            System.out.println("LLVM IR module generated. Use 'Guardar LLVM…' to export it.");
+            System.out.println("LLVM IR module generated. Use Save LLVM to export it.");
         } catch (RuntimeException ex) {
             System.out.println("Failed to generate LLVM IR: " + ex.getMessage());
             lastLlvmModule = null;

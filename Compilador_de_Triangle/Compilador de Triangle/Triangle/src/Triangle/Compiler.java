@@ -134,6 +134,11 @@ public class Compiler {
         compileProgram(sourceName, objectName, false, false);
     }
 
+    /* This function was created to emit the LLVM IR module to a file if requested via 
+     * system properties or environment variables.
+     */
+
+    // This method checks if LLVM artifacts should be emitted and writes the IR to a file.
     private static void emitLlvmModuleIfRequested(Program program, String tamObjectName) {
         if (!shouldEmitLlvmArtifacts()) {
             return;
@@ -156,6 +161,7 @@ public class Compiler {
         }
     }
 
+    // Determines if LLVM artifacts should be emitted based on system properties or environment variables.
     private static boolean shouldEmitLlvmArtifacts() {
         String backendProperty = System.getProperty("triangle.backend", "");
         if ("llvm".equalsIgnoreCase(backendProperty)) {
@@ -171,6 +177,7 @@ public class Compiler {
         return envFlag != null && !envFlag.equals("0");
     }
 
+    // Finally, if LLVM output is enabled, determine the output path for the LLVM IR file.
     private static Path determineLlvmOutputPath(String tamObjectName) {
         String override = System.getProperty("triangle.llvm.output");
         if (override != null && !override.trim().isEmpty()) {

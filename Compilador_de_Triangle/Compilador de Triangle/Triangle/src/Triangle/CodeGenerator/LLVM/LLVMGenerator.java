@@ -16,16 +16,19 @@ import java.util.Objects;
  * objects so the rest of the compiler can start integrating while the visitor implementation is
  * developed.
  */
+
 public final class LLVMGenerator {
 
   /**
    * Immutable settings used when requesting LLVM code generation.
    */
+
   public static final class Request {
 
     /**
      * Optimization presets passed to the LLVM toolchain.
      */
+
     public enum OptimizationLevel {
       NONE,
       O1,
@@ -36,6 +39,10 @@ public final class LLVMGenerator {
     private final OptimizationLevel optimizationLevel;
     private final boolean emitObjectFile;
     private final boolean emitAssembly;
+
+    /*
+     * Request constructor that configures code generation options.
+     */
 
     private Request(OptimizationLevel optimizationLevel, boolean emitObjectFile,
         boolean emitAssembly) {
@@ -77,6 +84,7 @@ public final class LLVMGenerator {
    * Result of LLVM code generation. File path fields remain null when the corresponding artifact was
    * not requested.
    */
+
   public static final class Result {
 
     private final String irModule;
@@ -109,16 +117,31 @@ public final class LLVMGenerator {
   public LLVMGenerator() {
   }
 
+  /*
+   * Generates LLVM IR for the given Triangle program according to the specified request.
+   */
+
   public Result generate(Program program, Request request) {
     Objects.requireNonNull(program, "program");
     Request effectiveRequest = (request != null) ? request : Request.defaults();
 
+    // Generate LLVM IR module from the AST
     LlvmModuleGenerator generator = new LlvmModuleGenerator(effectiveRequest);
     String ir = generator.generate(program);
     return new Result(ir, null, null);
   }
 
-  // --- Minimal LLVM backend implementation ---
+  /*
+   * Minimal LLVM backend implementation.
+   * Attributes:
+   * - request: code generation settings
+   * - module: LLVM module builder that assembles the IR text
+   * - symbols: symbol table for variable/function resolution
+   * - mangler: name mangler for generating unique LLVM identifiers
+   * - builtins: helper for emitting calls to built-in functions
+   * - functionCache: memoization map for function info objects
+   */
+
   private static final class LlvmModuleGenerator {
 
     private final Request request;
@@ -162,6 +185,10 @@ public final class LLVMGenerator {
       return module.buildModule();
     }
 
+    /* Collects top-level variable and constant declarations from the program
+     * and promotes them to LLVM global variables.
+     */
+
     private void collectTopLevelGlobals(Program program) {
       // We scan the Program's command for leading Let declarations used as setup; for simplicity
       // we only promote simple VarDeclaration / ConstDeclaration at the outermost level (no nested lets).
@@ -169,6 +196,10 @@ public final class LLVMGenerator {
       // A heuristic: if the top-level command starts with a LetCommand, harvest its declarations recursively.
       harvestGlobalsFromCommand(program.C);
     }
+    
+    /* Recursively harvests global variable and constant declarations from
+     * a command structure, promoting them to LLVM globals.
+     */
 
     private void harvestGlobalsFromCommand(Command command) {
       if (command instanceof LetCommand) {
@@ -182,6 +213,10 @@ public final class LLVMGenerator {
         harvestGlobalsFromCommand(seq.C2);
       }
     }
+
+    /* Harvests global variable and constant declarations from a declaration,
+     * promoting them to LLVM globals.
+     */
 
     private void harvestGlobalsFromDeclaration(Declaration decl) {
       if (decl instanceof SequentialDeclaration) {
@@ -216,6 +251,10 @@ public final class LLVMGenerator {
       return "@g$" + mangler.mangle(source);
     }
 
+    /* Tries to evaluate an expression to an integer constant.
+     * Returns null if the expression is not a constant integer.
+     */
+
     private Integer tryEvaluateIntExpression(Expression e) {
       if (e instanceof IntegerExpression) {
         IntegerExpression ie = (IntegerExpression) e;
@@ -226,6 +265,9 @@ public final class LLVMGenerator {
       }
       return null; // Non-constant or unsupported expression
     }
+
+    /* Compiles a command into LLVM IR within the given function context.
+     */
 
     private void compileCommand(Command command, FunctionContext ctx) {
       if (command == null || command instanceof EmptyCommand) {
@@ -305,6 +347,10 @@ public final class LLVMGenerator {
       throw new UnsupportedOperationException("Unsupported command: " + command.getClass().getSimpleName());
     }
 
+    /* Resolves a variable vname to its corresponding VariableSymbol.
+     * Only simple identifier vnames are supported for now.
+     */
+
     private VariableSymbol resolveVariable(Vname V) {
       // Only simple identifier vnames supported right now.
       if (V instanceof SimpleVname) {
@@ -354,6 +400,10 @@ public final class LLVMGenerator {
       // Other declaration forms are not supported yet
       throw new UnsupportedOperationException("Unsupported declaration: " + declaration.getClass().getSimpleName());
     }
+
+    /* Ensures a FunctionInfo object exists for the given FuncDeclaration,
+     * creating and caching it if necessary.
+     */
 
     private FunctionInfo ensureFunctionInfo(FuncDeclaration decl) {
       FunctionInfo cached = functionCache.get(decl);
@@ -450,6 +500,10 @@ public final class LLVMGenerator {
       info.defined = true;
     }
 
+    /* Compiles an expression into LLVM IR within the given function context,
+     * returning a ValueRef representing the computed value.
+     */
+
     private ValueRef compileExpression(Expression e, FunctionContext ctx) {
       if (e instanceof IntegerExpression) {
         IntegerExpression ie = (IntegerExpression) e;
@@ -518,6 +572,10 @@ public final class LLVMGenerator {
       throw new UnsupportedOperationException("Unsupported binary operator: " + o);
     }
 
+    /* Compiles a function call into LLVM IR within the given function context,
+     * returning a ValueRef representing the result if expected.
+     */
+
     private ValueRef compileCall(FunctionContext ctx, Identifier id, ActualParameterSequence aps, boolean expectResult) {
       String name = (id != null) ? id.spelling : "";
       if (builtins.isBuiltin(name)) {
@@ -574,7 +632,10 @@ public final class LLVMGenerator {
       List<ValueRef> values = new ArrayList<ValueRef>();
       collectActualParameters(seq, values, ctx);
       return values;
-    }
+    } 
+
+    /* Recursively collects actual parameters into the given output list.
+     */
 
     private void collectActualParameters(ActualParameterSequence seq, List<ValueRef> out, FunctionContext ctx) {
       if (seq == null || seq instanceof EmptyActualParameterSequence) {
@@ -605,6 +666,9 @@ public final class LLVMGenerator {
       }
       throw new UnsupportedOperationException("Unsupported actual parameter: " + ap.getClass().getSimpleName());
     }
+
+    /* Resolves a function identifier to a ValueRef representing its pointer.
+     */
 
     private ValueRef resolveFunctionPointer(Identifier id) {
       String name = (id != null) ? id.spelling : "";
